@@ -81,7 +81,7 @@ $Config = @{
     
     # Theme configuration - set to $null to skip theme application
     Theme            = @{
-        Name      = "Comtoso Theme"  # Name of the theme to create or apply
+        Name      = "Contoso Theme"  # Name of the theme to create or apply
         # The Colors property will be populated with the selected theme from $ColorThemes
         # No need to define colors here - they will be set based on ColorTheme selection
         Colors    = @{}
