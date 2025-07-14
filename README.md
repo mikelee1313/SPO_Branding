@@ -4,12 +4,13 @@ This PowerShell script automates the deployment of consistent branding (logo and
 
 ## Features
 
-- Deploys consistent logo and color theme to multiple SharePoint sites
+- Deploys consistent logo and theme to multiple SharePoint sites
 - Selectively apply logo updates, theme colors, or both
-- Choose from 11 predefined SharePoint color themes, or create a custom theme
+- Choose from 11 predefined SharePoint color themes
 - Process site collections and their subsites
 - Supports multi-geo SharePoint environments
-- Uses secure authentication via Entra ID App Registration with certificate
+- Secure certificate-based authentication
+- Smart throttling protection with exponential backoff
 - Detailed logging of all operations
 - Completely self-contained - no additional configuration files needed
 
@@ -18,7 +19,7 @@ This PowerShell script automates the deployment of consistent branding (logo and
 1. PowerShell 5.1 or later
 2. PnP.PowerShell module (script will prompt to install if not present)
 3. Entra ID App Registration with appropriate permissions
-4. Certificate for authentication (referenced by thumbprint)
+4. Certificate for certificate-based authentication
 5. CSV file with site URLs (see sample-sites.csv for format)
 
 ## Setup Instructions
@@ -26,7 +27,8 @@ This PowerShell script automates the deployment of consistent branding (logo and
 1. **Configure Entra ID App Registration:**
    - Register a new app in Entra ID
    - Add API permissions for SharePoint (Sites.FullControl.All)
-   - Create and upload a certificate
+   - Either:
+     - Create and upload a certificate for certificate-based authentication
    - Note the App ID, Tenant ID, and certificate thumbprint
 
 2. **Update Configuration:**
@@ -35,7 +37,9 @@ This PowerShell script automates the deployment of consistent branding (logo and
    - Set the path to your logo image file
    - Configure branding options (ChangeLogoImage, ApplyThemeColors, ProcessSubsites)
    - Choose a color theme from the predefined options
-   - Enter your Entra ID App details (TenantName, AppId, Thumbprint, TenantId)
+   - Enter your Entra ID App details (TenantName, AppId, TenantId)
+   - Enter your certificate thumbprint
+   - Configure throttling settings (MaxRetries, RetryInitialWait, RetryFactor)
 
 3. **Prepare Site List:**
    - Create a CSV file with a column header named "URL"
@@ -52,7 +56,8 @@ Simply run the script:
 The script is completely self-contained and will:
 - Verify prerequisites
 - Check execution policy and adjust if needed
-- Connect to each site using secure app-only authentication
+- Connect to each site using secure app-only authentication with your chosen method
+- Implement smart throttling protection with exponential backoff
 - Process site collections and subsites (if enabled)
 - Apply the specified logo and/or theme based on configuration
 - Generate a detailed log file
@@ -77,6 +82,11 @@ $Config = @{
     # Set to $false if you only want to update the logo without changing site colors
     ApplyThemeColors = $true
     
+    # Whether to apply an existing theme instead of creating a new one
+    # When set to $true, the script will look for the theme specified in Theme.Name
+    # and apply it without creating a new theme
+    ApplyExistingTheme = $false
+    
     # Whether to process subsites in addition to site collections
     # Set to $true to apply branding to all subsites of the site collections in the CSV
     ProcessSubsites  = $true
@@ -96,8 +106,15 @@ $Config = @{
     # Entra App Registration details
     TenantName       = "contoso"
     AppId            = "12345678-1234-1234-1234-1234567890ab"
-    Thumbprint       = "1234567890ABCDEF1234567890ABCDEF12345678"
     TenantId         = "12345678-1234-1234-1234-1234567890ab"
+    
+    # Certificate Thumbprint for authentication
+    Thumbprint       = "1234567890ABCDEF1234567890ABCDEF12345678"
+    
+    # Throttling settings
+    MaxRetries       = 5           # Maximum number of retry attempts for throttled requests
+    RetryInitialWait = 2           # Initial wait time in seconds before first retry
+    RetryFactor      = 2           # Multiplicative factor for subsequent retry waits (exponential backoff)
 }
 ```
 
@@ -112,6 +129,12 @@ The script provides flexible options for controlling which branding elements to 
 ### Theme Options
 - **ApplyThemeColors**: When set to `$true`, the script will apply the color theme specified in `ColorTheme`
 - If set to `$false`, the script will skip theme color updates entirely
+
+### Theme Application Options
+- **ApplyExistingTheme**: When set to `$true`, the script will look for a theme with the name specified in `Theme.Name` 
+  and apply it without creating a new theme
+- When set to `$false` (default), the script will create a new theme with the colors specified by `ColorTheme`
+- This is useful when you already have a published theme in your tenant that you want to apply to multiple sites
 
 ### Site Processing Options
 - **ProcessSubsites**: When set to `$true`, the script will process both site collections and all their subsites
@@ -154,18 +177,47 @@ When `ProcessSubsites` is enabled, the script will automatically discover and pr
 
 ## Authentication
 
-The script uses certificate thumbprint authentication with an Entra ID App Registration:
+The script supports two authentication methods via Entra ID App Registration:
+
+1. **Certificate-based Authentication**
+   - Set `AuthType = "Certificate"` in the configuration
+   - Provide the certificate thumbprint in the `Thumbprint` parameter
+   - The certificate must be installed in the certificate store of the machine running the script
+   - More secure method, recommended for production environments
+
+2. **Client Secret Authentication**
+   - Set `AuthType = "ClientSecret"` in the configuration
+   - Provide the client secret in the `ClientSecret` parameter
+   - Simpler to set up but less secure than certificate-based authentication
 
 ### Entra ID App Registration Setup
 
 1. Create an Entra ID App Registration in the Azure Portal
-2. Generate a certificate and upload it to the app registration
-3. Note the certificate thumbprint
-4. Grant the app the necessary SharePoint permissions:
+2. Grant the app the necessary SharePoint permissions:
    - SharePoint: `Sites.FullControl.All`
-5. Configure the app details in the script configuration section
+3. Choose your authentication method:
+   - For certificate: Generate a certificate and upload it to the app registration, note the thumbprint
+   - For client secret: Create a new client secret and save the value securely
+4. Configure the app details and your chosen authentication method in the script configuration section
 
 This approach eliminates the need for user credentials or interactive login, providing a secure and automated solution for branding deployment.
+
+## Throttling Protection
+
+The script implements smart throttling protection with exponential backoff to handle SharePoint API throttling gracefully:
+
+- **MaxRetries**: Maximum number of retry attempts for throttled requests (default: 5)
+- **RetryInitialWait**: Initial wait time in seconds before first retry (default: 2)
+- **RetryFactor**: Multiplicative factor for subsequent retry waits (default: 2)
+
+With these settings, if a request is throttled:
+1. First retry will wait 2 seconds
+2. Second retry will wait 4 seconds (2 × 2)
+3. Third retry will wait 8 seconds (4 × 2)
+4. Fourth retry will wait 16 seconds (8 × 2)
+5. Fifth retry will wait 32 seconds (16 × 2)
+
+This exponential backoff strategy helps the script gracefully handle throttling situations when deploying branding to many sites or in environments with high API traffic.
 
 ## Logging
 
@@ -187,11 +239,20 @@ The script includes robust error handling to ensure it continues processing site
 
 - Check the log file for detailed error messages
 - Verify Entra ID App has proper permissions (Sites.FullControl.All)
-- Ensure your certificate is valid and installed correctly
+- For certificate authentication:
+  - Ensure your certificate is valid and installed correctly on the machine running the script
+  - Verify the thumbprint is correct in the configuration
+- For client secret authentication:
+  - Ensure the client secret is valid and has not expired
+  - Check that the client secret value is correctly entered in the configuration
 - Confirm the logo file exists at the specified path
 - Make sure your selected color theme is properly defined
 - If subsites aren't being processed, verify the ProcessSubsites setting is $true
 - Check that the Entra ID App has permissions for both site collections and subsites
+- If experiencing throttling issues:
+  - Check logs for throttling patterns
+  - Consider increasing RetryInitialWait or MaxRetries in high-traffic environments
+  - Try running the script during off-peak hours
 
 ## License
 
