@@ -4,9 +4,9 @@ This PowerShell script automates the deployment of consistent branding (logo and
 
 ## Features
 
-- Deploys consistent logo and theme to multiple SharePoint sites
+- Deploys consistent logo and color theme to multiple SharePoint sites
 - Selectively apply logo updates, theme colors, or both
-- Choose from 11 predefined SharePoint color themes
+- Choose from 11 predefined SharePoint color themes, or create a custom theme
 - Process site collections and their subsites
 - Supports multi-geo SharePoint environments
 - Uses secure authentication via Entra ID App Registration with certificate
