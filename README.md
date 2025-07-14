@@ -16,9 +16,10 @@ This PowerShell script automates the deployment of consistent branding (logo and
 
 ## Prerequisites
 
-1. PowerShell 5.1 or later
+1. PowerShell 7.4 or later
 2. PnP.PowerShell module (script will prompt to install if not present)
 3. Entra ID App Registration with appropriate permissions
+   - SharePoint: Sites.Full.Control (Application)
 4. Certificate for certificate-based authentication
 5. CSV file with site URLs (see sample-sites.csv for format)
 
