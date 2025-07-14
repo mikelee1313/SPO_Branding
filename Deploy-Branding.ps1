@@ -1,16 +1,3 @@
-# To run this script:
-# 1. Modify the configuration section below to match your environment
-# 2. Create a CSV file with a column named "URL" containing SharePoint site URLs
-# 3. Make sure you have PnP PowerShell module installed (script will prompt to install if needed)
-# 4. Configure branding options:
-#    - Set ChangeLogoImage to control whether to update the site logo
-#    - Set ApplyThemeColors to control whether to apply theme colors
-#    - Set ProcessSubsites to control whether to process subsites in addition to site collections
-#    - Choose a color theme by setting the ColorTheme parameter if applying colors
-# 5. Run the script: .\Deploy-Branding.ps1
-#
-# Note: This script is completely self-contained and doesn't require any additional configuration files
-
 <#
 .SYNOPSIS
     Updates SharePoint Online site branding (logo and theme) for multiple sites.
@@ -42,6 +29,20 @@ production, or delivery of the scripts be liable for any damages whatsoever
 (including, without limitation, damages for loss of business profits, business interruption, 
 loss of business information, or other pecuniary loss) arising out of the use of or inability 
 to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+
+.EXTERNALHELP
+To run this script:
+1. Modify the configuration section below to match your environment
+2. Create a CSV file with a column named "URL" containing SharePoint site URLs
+3. Make sure you have PnP PowerShell module installed. 
+   - If not installed, the script will prompt to install it.
+4. Configure branding options:
+    - Set ChangeLogoImage to control whether to update the site logo
+    - Set ApplyThemeColors to control whether to apply theme colors
+    - Set ApplyExistingTheme to true if you want to apply an existing theme instead of creating a new one
+    - Set ProcessSubsites to control whether to process subsites in addition to site collections
+    - Choose a color theme by setting the ColorTheme parameter if applying colors
+5. Run the script: .\Deploy-Branding.ps1
 
 #>
 
