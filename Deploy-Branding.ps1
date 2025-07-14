@@ -50,6 +50,11 @@ $Config = @{
     # Set to $false if you only want to update the logo without changing site colors
     ApplyThemeColors = $true
     
+    # Whether to apply an existing theme instead of creating a new one
+    # When set to $true, the script will look for the theme specified in Theme.Name
+    # and apply it without creating a new theme
+    ApplyExistingTheme = $false
+    
     # Whether to process subsites in addition to site collections
     # Set to $true to apply branding to all subsites of the site collections in the CSV
     ProcessSubsites  = $true
@@ -59,11 +64,11 @@ $Config = @{
     # Purple, Gray, Periwinkle, DarkYellow, DarkBlue, Custom
     
     # Available themes are defined in the $ColorThemes array below
-    ColorTheme       = "Periwinkle"
+    ColorTheme       = "Orange"  # Set to the desired theme name from $ColorThemes
     
     # Theme configuration - set to $null to skip theme application
     Theme            = @{
-        Name      = "CompanyTheme"
+        Name      = "Comtoso Theme"  # Name of the theme to create or apply
         # The Colors property will be populated with the selected theme from $ColorThemes
         # No need to define colors here - they will be set based on ColorTheme selection
         Colors    = @{}
@@ -77,6 +82,11 @@ $Config = @{
     AppId            = "5baa1427-1e90-4501-831d-a8e67465f0d9"
     Thumbprint       = "B696FDCFE1453F3FBC6031F54DE988DA0ED905A9"
     TenantId         = "85612ccb-4c28-4a34-88df-a538cc139a51"
+    
+    # Throttling settings
+    MaxRetries       = 5           # Maximum number of retry attempts for throttled requests
+    RetryInitialWait = 2           # Initial wait time in seconds before first retry
+    RetryFactor      = 2           # Multiplicative factor for subsequent retry waits (exponential backoff)
 }
 
 # Set up log file path in the temp directory
@@ -437,6 +447,65 @@ function Write-Log {
     Add-Content -Path $Config.LogPath -Value $logEntry
 }
 
+# Function to handle SharePoint API throttling with exponential backoff
+function Invoke-WithThrottleHandling {
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+        
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = $Config.MaxRetries,
+        
+        [Parameter(Mandatory = $false)]
+        [int]$InitialWaitSeconds = $Config.RetryInitialWait,
+        
+        [Parameter(Mandatory = $false)]
+        [int]$RetryFactor = $Config.RetryFactor
+    )
+    
+    $retryCount = 0
+    $waitTime = $InitialWaitSeconds
+    $success = $false
+    $result = $null
+    $errorDetails = $null
+    
+    do {
+        try {
+            Write-Log "Executing API call with throttle handling: Try Count $($retryCount + 1) of MaxRetries $($MaxRetries + 1)"
+            $result = & $ScriptBlock
+            $success = $true
+            return $result
+        }
+        catch {
+            $errorDetails = $_
+            
+            # Check if the error is a throttling error (429 Too Many Requests)
+            if ($_.Exception.Message -like "*429*" -or 
+                $_.Exception.Message -like "*too many requests*" -or
+                $_.Exception.Message -like "*throttl*") {
+                
+                if ($retryCount -lt $MaxRetries) {
+                    $retryCount++
+                    Write-Log "Request throttled. Waiting $waitTime seconds before retry $retryCount of $MaxRetries..." -Level "WARNING"
+                    Start-Sleep -Seconds $waitTime
+                    
+                    # Exponential backoff - double the wait time for next retry
+                    $waitTime = $waitTime * $RetryFactor
+                }
+                else {
+                    Write-Log "Maximum retries reached. API request failed permanently." -Level "ERROR"
+                    throw $errorDetails
+                }
+            }
+            else {
+                # If it's not a throttling error, don't retry
+                Write-Log "Non-throttling error occurred: $($_.Exception.Message)" -Level "ERROR"
+                throw $errorDetails
+            }
+        }
+    } while ($retryCount -le $MaxRetries -and -not $success)
+}
+
 # Function to determine SharePoint geo-location and connect
 function Connect-ToSharePointGeo {
     param (
@@ -466,12 +535,15 @@ function Connect-ToSharePointGeo {
     }
     
     try {
-        # Connect to SharePoint Online using PnP PowerShell with certificate thumbprint
+        # Connect to SharePoint Online using PnP PowerShell with certificate authentication
         Write-Log "Connecting to SharePoint site: $SiteUrl"
         
-        # Connect using App-Only authentication with certificate thumbprint
         Write-Log "Connecting with app registration using certificate thumbprint"
-        Connect-PnPOnline -Url $SiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
+        
+        # Use throttling handler for the connection
+        Invoke-WithThrottleHandling -ScriptBlock {
+            Connect-PnPOnline -Url $SiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
+        }
         
         Write-Log "Successfully connected to SharePoint site: $SiteUrl"
         return $true
@@ -509,16 +581,25 @@ function Update-SiteBranding {
             $assetLibrary = "SiteAssets"
             
             # Ensure SiteAssets library exists
-            $web = Get-PnPWeb
-            $assetLibraryExists = Get-PnPList -Identity $assetLibrary -ErrorAction SilentlyContinue
+            $web = Invoke-WithThrottleHandling -ScriptBlock {
+                Get-PnPWeb
+            }
+            
+            $assetLibraryExists = Invoke-WithThrottleHandling -ScriptBlock {
+                Get-PnPList -Identity $assetLibrary -ErrorAction SilentlyContinue
+            }
             
             if (-not $assetLibraryExists) {
                 Write-Log "Creating SiteAssets library" -Level "INFO"
-                New-PnPList -Title $assetLibrary -Template DocumentLibrary -OnQuickLaunch
+                Invoke-WithThrottleHandling -ScriptBlock {
+                    New-PnPList -Title $assetLibrary -Template DocumentLibrary -OnQuickLaunch
+                }
             }
             
             # Upload the logo file
-            $logoFile = Add-PnPFile -Path $Config.LogoPath -Folder $assetLibrary -ErrorAction Stop
+            $logoFile = Invoke-WithThrottleHandling -ScriptBlock {
+                Add-PnPFile -Path $Config.LogoPath -Folder $assetLibrary -ErrorAction Stop
+            }
             
             # Get the URL of the uploaded file
             $logoUrl = $logoFile.ServerRelativeUrl
@@ -530,14 +611,18 @@ function Update-SiteBranding {
             # Try using newer cmdlet format first, then fall back to older version if needed
             try {
                 # For modern PnP.PowerShell module (newer versions)
-                Set-PnPWeb -SiteLogoUrl $logoUrl
+                Invoke-WithThrottleHandling -ScriptBlock {
+                    Set-PnPWeb -SiteLogoUrl $logoUrl
+                }
                 Write-Log "Successfully set site logo using Set-PnPWeb cmdlet"
             }
             catch {
                 try {
                     # For older PnP PowerShell module versions
                     Write-Log "Falling back to older cmdlet format..." -Level "INFO"
-                    Set-PnPSite -LogoUrl $logoUrl
+                    Invoke-WithThrottleHandling -ScriptBlock {
+                        Set-PnPSite -LogoUrl $logoUrl
+                    }
                     Write-Log "Successfully set site logo using Set-PnPSite cmdlet"
                 }
                 catch {
@@ -593,108 +678,227 @@ function Update-SiteBranding {
                     return $false
                 }
                 
-                # Check if theme exists and handle theme management using direct SharePoint REST API calls
-                # This avoids PnP parameter name inconsistencies
-                try {
-                    $themeName = $Config.Theme.Name
-                    Write-Log "Managing theme '$themeName' using REST API approach..."
-                    
-                    # Create theme JSON definition
-                    $themeJson = @{
-                        "name"       = $themeName
-                        "palette"    = $Config.Theme.Colors
-                        "isInverted" = $false
-                    } | ConvertTo-Json -Depth 10
-                    
-                    # Output the theme JSON for verification
-                    Write-Log "Theme definition JSON to be applied:"
-                    Write-Log $themeJson
-                    
-                    # Get the client context and SharePoint client object models
-                    $context = Get-PnPContext
-                    $web = $context.Web
-                    $context.Load($web)
-                    Invoke-PnPQuery
-                    
-                    # Create a tenant admin client context
-                    $tenant = New-Object Microsoft.Online.SharePoint.TenantAdministration.Tenant($context)
-                    
-                    Write-Log "Removing any existing theme with the same name..."
-                    try {
-                        # Attempt to remove the theme if it exists (we don't check first, just try to remove and handle errors)
-                        $tenant.DeleteTenantTheme($themeName)
-                        $context.ExecuteQuery()
-                        Write-Log "Existing theme removed successfully"
-                    }
-                    catch {
-                        # Theme might not exist, which is fine
-                        Write-Log "No existing theme found or unable to remove: $_" -Level "INFO"
-                    }
-                    
-                    Write-Log "Creating new theme..."
-                    try {
-                        # Add the new theme
-                        $tenant.AddTenantTheme($themeName, $themeJson)
-                        $context.ExecuteQuery()
-                        Write-Log "Theme created successfully"
-                    }
-                    catch {
-                        Write-Log "Failed to create theme using client object model: $_" -Level "ERROR"
-                        throw
-                    }
+                # Get the theme name from config
+                $themeName = $Config.Theme.Name
                 
-                    # Reconnect to original site
-                    try {
-                        Write-Log "Reconnecting to original site ($originalSiteUrl)..."
-                        Connect-PnPOnline -Url $originalSiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
-                        Write-Log "Successfully reconnected to original site"
-                    }
-                    catch {
-                        Write-Log "Failed to reconnect to original site: $_" -Level "ERROR"
-                        return $false
-                    }
-                
-                    # Apply theme to current site using direct REST API call
-                    try {
-                        Write-Log "Applying theme '$themeName' to site using REST API..."
+                # Check if we should apply an existing theme
+                if ($Config.ApplyExistingTheme) {
+                    Write-Log "ApplyExistingTheme is set to true, checking if theme '$themeName' exists..."
                     
-                        # Get the web URL for the absolute path
-                        $web = Get-PnPWeb
-                        $webUrl = $web.Url
+                    # Check if theme exists using SharePoint REST API
+                    try {
+                        # Use the REST API to get the list of available themes
+                        Write-Log "Checking if theme '$themeName' exists using REST API..."
                         
-                        # Use a simpler approach with Set-PnPWebTheme
-                        try {
-                            Write-Log "Trying Set-PnPWebTheme cmdlet..."
-                            Set-PnPWebTheme -Theme $themeName
-                            Write-Log "Successfully applied theme using Set-PnPWebTheme"
+                        $themeExists = $false
+                        
+                        # Get all themes using the REST API
+                        $restEndpoint = "$adminUrl/_api/thememanager/GetTenantThemingOptions"
+                        $themesResponse = Invoke-WithThrottleHandling -ScriptBlock {
+                            Invoke-PnPSPRestMethod -Method Get -Url $restEndpoint
                         }
-                        catch {
-                            Write-Log "Set-PnPWebTheme failed, trying alternative approach: $_" -Level "WARNING"
+                        
+                        # Parse the response to check if our theme exists
+                        if ($themesResponse -and $themesResponse.themePreviews) {
+                            $availableThemes = $themesResponse.themePreviews
                             
-                            # Alternative approach using direct REST API
+                            # Check if our theme name exists in the available themes
+                            foreach ($availableTheme in $availableThemes) {
+                                if ($availableTheme.name -eq $themeName) {
+                                    $themeExists = $true
+                                    Write-Log "Theme '$themeName' found in the tenant themes" -Level "INFO"
+                                    break
+                                }
+                            }
+                        }
+                        
+                        # If theme doesn't exist, we can try another approach
+                        if (-not $themeExists) {
+                            # Try using SPO PowerShell to get themes
                             try {
-                                # Format the REST endpoint correctly
-                                $restBody = "{'name':'$themeName'}"
-                                $restEndpoint = "$webUrl/_api/web/ApplyTheme"
+                                Write-Log "Theme not found in REST API response, trying alternative method..." -Level "INFO"
                                 
-                                # Execute the REST call with proper parameters
-                                Invoke-PnPSPRestMethod -Method Post -Url $restEndpoint -Content $restBody -ContentType "application/json;odata=verbose" -Headers @{"X-RequestDigest" = (Get-PnPRequestDigest) }
-                                Write-Log "Successfully applied theme using REST API"
+                                # Use Get-PnPTenantTheme to check if the theme exists
+                                $tenantThemes = Invoke-WithThrottleHandling -ScriptBlock {
+                                    Get-PnPTenantTheme -ErrorAction SilentlyContinue
+                                }
+                                
+                                if ($tenantThemes) {
+                                    foreach ($tenantTheme in $tenantThemes) {
+                                        if ($tenantTheme.Name -eq $themeName) {
+                                            $themeExists = $true
+                                            Write-Log "Theme '$themeName' found using Get-PnPTenantTheme" -Level "INFO"
+                                            break
+                                        }
+                                    }
+                                }
                             }
                             catch {
-                                Write-Log "REST API approach failed: $_" -Level "ERROR"
-                                # Continue execution even if theme application fails
+                                Write-Log "Error using Get-PnPTenantTheme: $_" -Level "WARNING"
+                                # Continue even if this check fails
                             }
+                        }
+                        
+                        # Check result
+                        if ($themeExists) {
+                            Write-Log "Theme '$themeName' exists in the tenant, will apply it to the site"
+                        } else {
+                            Write-Log "Theme '$themeName' does not exist in the tenant" -Level "WARNING"
+                            Write-Log "Since ApplyExistingTheme is true but theme doesn't exist, will not create a new theme" -Level "WARNING"
+                            
+                            # Reconnect to original site
+                            try {
+                                Write-Log "Reconnecting to original site ($originalSiteUrl)..."
+                                
+                                Invoke-WithThrottleHandling -ScriptBlock {
+                                    Connect-PnPOnline -Url $originalSiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
+                                }
+                                
+                                Write-Log "Successfully reconnected to original site"
+                            }
+                            catch {
+                                Write-Log "Failed to reconnect to original site: $_" -Level "ERROR"
+                                return $false
+                            }
+                            
+                            # Return true to continue processing the next site
+                            return $true
                         }
                     }
                     catch {
-                        Write-Log "Failed to apply theme: $_" -Level "ERROR"
-                        # Continue execution
+                        Write-Log "Error checking if theme exists: $_" -Level "ERROR"
+                        
+                        # Reconnect to original site
+                        try {
+                            Write-Log "Reconnecting to original site ($originalSiteUrl)..."
+                            
+                            Invoke-WithThrottleHandling -ScriptBlock {
+                                Connect-PnPOnline -Url $originalSiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
+                            }
+                            
+                            Write-Log "Successfully reconnected to original site"
+                        }
+                        catch {
+                            Write-Log "Failed to reconnect to original site: $_" -Level "ERROR"
+                            return $false
+                        }
+                        
+                        # Return true to continue processing the next site
+                        return $true
+                    }
+                } else {
+                    # Check if theme exists and handle theme management using direct SharePoint REST API calls
+                    # This avoids PnP parameter name inconsistencies
+                    try {
+                        Write-Log "Managing theme '$themeName' using REST API approach..."
+                        
+                        # Create theme JSON definition
+                        $themeJson = @{
+                            "name"       = $themeName
+                            "palette"    = $Config.Theme.Colors
+                            "isInverted" = $false
+                        } | ConvertTo-Json -Depth 10
+                        
+                        # Output the theme JSON for verification
+                        Write-Log "Theme definition JSON to be applied:"
+                        Write-Log $themeJson
+                        
+                        # Get the client context and SharePoint client object models
+                        $context = Get-PnPContext
+                        $web = $context.Web
+                        $context.Load($web)
+                        Invoke-PnPQuery
+                        
+                        # Create a tenant admin client context
+                        $tenant = New-Object Microsoft.Online.SharePoint.TenantAdministration.Tenant($context)
+                        
+                        Write-Log "Removing any existing theme with the same name..."
+                        try {
+                            # Attempt to remove the theme if it exists (we don't check first, just try to remove and handle errors)
+                            $tenant.DeleteTenantTheme($themeName)
+                            $context.ExecuteQuery()
+                            Write-Log "Existing theme removed successfully"
+                        }
+                        catch {
+                            # Theme might not exist, which is fine
+                            Write-Log "No existing theme found or unable to remove: $_" -Level "INFO"
+                        }
+                        
+                        Write-Log "Creating new theme..."
+                        try {
+                            # Add the new theme
+                            $tenant.AddTenantTheme($themeName, $themeJson)
+                            $context.ExecuteQuery()
+                            Write-Log "Theme created successfully"
+                        }
+                        catch {
+                            Write-Log "Failed to create theme using client object model: $_" -Level "ERROR"
+                            throw
+                        }
+                    }
+                    catch {
+                        Write-Log "Error managing or applying theme: $_" -Level "ERROR"
+                        # Don't return false here, as we want to continue even if theme application fails
+                    }
+                }
+                
+                # Reconnect to original site
+                try {
+                    Write-Log "Reconnecting to original site ($originalSiteUrl)..."
+                    
+                    Invoke-WithThrottleHandling -ScriptBlock {
+                        Connect-PnPOnline -Url $originalSiteUrl -ClientId $Config.AppId -Thumbprint $Config.Thumbprint -Tenant $Config.TenantId
+                    }
+                    
+                    Write-Log "Successfully reconnected to original site"
+                }
+                catch {
+                    Write-Log "Failed to reconnect to original site: $_" -Level "ERROR"
+                    return $false
+                }
+            
+                # Apply theme to current site using direct REST API call
+                try {
+                    Write-Log "Applying theme '$themeName' to site using REST API..."
+                
+                    # Get the web URL for the absolute path
+                    $web = Invoke-WithThrottleHandling -ScriptBlock {
+                        Get-PnPWeb
+                    }
+                    $webUrl = $web.Url
+                    
+                    # Use a simpler approach with Set-PnPWebTheme
+                    try {
+                        Write-Log "Trying Set-PnPWebTheme cmdlet..."
+                        Invoke-WithThrottleHandling -ScriptBlock {
+                            Set-PnPWebTheme -Theme $themeName
+                        }
+                        Write-Log "Successfully applied theme using Set-PnPWebTheme"
+                    }
+                    catch {
+                        Write-Log "Set-PnPWebTheme failed, trying alternative approach: $_" -Level "WARNING"
+                        
+                        # Alternative approach using direct REST API
+                        try {
+                            # Format the REST endpoint correctly
+                            $restBody = "{'name':'$themeName'}"
+                            $restEndpoint = "$webUrl/_api/web/ApplyTheme"
+                            
+                            # Execute the REST call with proper parameters
+                            Invoke-WithThrottleHandling -ScriptBlock {
+                                Invoke-PnPSPRestMethod -Method Post -Url $restEndpoint -Content $restBody -ContentType "application/json;odata=verbose" -Headers @{"X-RequestDigest" = (Invoke-WithThrottleHandling -ScriptBlock { Get-PnPRequestDigest }) }
+                            }
+                            Write-Log "Successfully applied theme using REST API"
+                        }
+                        catch {
+                            Write-Log "REST API approach failed: $_" -Level "ERROR"
+                            # Continue execution even if theme application fails
+                        }
                     }
                 }
                 catch {
-                    Write-Log "Error managing or applying theme: $_" -Level "ERROR"
-                    # Don't return false here, as we want to continue even if theme application fails
+                    Write-Log "Failed to apply theme: $_" -Level "ERROR"
+                    # Continue execution
                 }
             }
             catch {
@@ -731,7 +935,9 @@ function Get-AllSubsites {
         # Connect to the site collection
         if (Connect-ToSharePointGeo -SiteUrl $SiteUrl) {
             # Get all immediate subsites
-            $subsites = Get-PnPSubWeb -Recurse -IncludeRootWeb:$false -ErrorAction SilentlyContinue
+            $subsites = Invoke-WithThrottleHandling -ScriptBlock {
+                Get-PnPSubWeb -Recurse -IncludeRootWeb:$false -ErrorAction SilentlyContinue
+            }
             
             if ($subsites -and $subsites.Count -gt 0) {
                 Write-Log "Found $($subsites.Count) subsites under $SiteUrl" -Level "INFO"
@@ -784,7 +990,7 @@ try {
     # Initialize log file
     $logHeader = "=== SharePoint Branding Update Script Started at $(Get-Date) ==="
     Set-Content -Path $Config.LogPath -Value $logHeader
-    Write-Log "Script started with configuration: CSV=$($Config.CsvPath), Logo=$($Config.LogoPath), ChangeLogoImage=$($Config.ChangeLogoImage), ApplyThemeColors=$($Config.ApplyThemeColors), ProcessSubsites=$($Config.ProcessSubsites), Theme=$($Config.Theme.Name)"
+    Write-Log "Script started with configuration: CSV=$($Config.CsvPath), Logo=$($Config.LogoPath), ChangeLogoImage=$($Config.ChangeLogoImage), ApplyThemeColors=$($Config.ApplyThemeColors), ApplyExistingTheme=$($Config.ApplyExistingTheme), ProcessSubsites=$($Config.ProcessSubsites), Theme=$($Config.Theme.Name)"
     
     # Check if CSV file exists
     if (-not (Test-Path -Path $Config.CsvPath)) {
@@ -815,7 +1021,7 @@ try {
         Write-Log "Please update the TenantId in the configuration section with your actual tenant ID" -Level "WARNING"
     }
     
-    Write-Log "Using app registration authentication with AppID: $($Config.AppId)"
+    Write-Log "Using app registration authentication with certificate thumbprint"
     Write-Log "Found $($sites.Count) sites to process"
     
     # Process each site
